@@ -6,6 +6,7 @@ import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
 from google import genai
 from google.genai import types
@@ -13,6 +14,13 @@ from google.genai import types
 load_dotenv()
 
 app = FastAPI(title="Thread Link Summarizer API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8081", "http://127.0.0.1:8081"],
+    allow_credentials=False,
+    allow_methods=["POST"],
+    allow_headers=["Content-Type"],
+)
 
 
 class ParseRequest(BaseModel):
