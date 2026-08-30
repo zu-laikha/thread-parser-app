@@ -2,6 +2,7 @@ import * as Clipboard from 'expo-clipboard';
 import { useState } from 'react';
 import {
   ActivityIndicator,
+  Image,
   Linking,
   Platform,
   Pressable,
@@ -25,6 +26,8 @@ type ParsedPost = {
   dates_or_validity: string;
   key_highlights: string[];
   original_url: string;
+  image_url?: string;
+  image_urls?: string[];
 };
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://127.0.0.1:8000';
@@ -104,6 +107,39 @@ export default function HomeScreen() {
 
         {result && (
           <ThemedView type="backgroundElement" style={styles.resultCard}>
+            {(result.image_urls && result.image_urls.length > 0) ? (
+              <ScrollView
+                horizontal
+                pagingEnabled
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.carouselContainer}
+              >
+                {result.image_urls.map((imageUrl, index) => (
+                  <View key={`${imageUrl}-${index}`} style={styles.carouselItem}>
+                    <Image
+                      source={{ uri: imageUrl }}
+                      style={styles.resultImage}
+                      resizeMode="cover"
+                    />
+                  </View>
+                ))}
+              </ScrollView>
+            ) : result.image_url ? (
+              <ScrollView
+                horizontal
+                pagingEnabled
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.carouselContainer}
+              >
+                <View style={styles.carouselItem}>
+                  <Image
+                    source={{ uri: result.image_url }}
+                    style={styles.resultImage}
+                    resizeMode="cover"
+                  />
+                </View>
+              </ScrollView>
+            ) : null}
             <View style={styles.resultHeader}>
               <ThemedText type="smallBold" themeColor="textSecondary">{result.category.toUpperCase()}</ThemedText>
               <ThemedText type="small" themeColor="textSecondary">{result.subcategory}</ThemedText>
@@ -146,7 +182,6 @@ const styles = StyleSheet.create({
     paddingVertical: 32,
   },
   heading: {
-    gap: 10,
     marginBottom: 28,
   },
   title: {
@@ -156,7 +191,6 @@ const styles = StyleSheet.create({
   inputPanel: {
     padding: 20,
     borderRadius: 12,
-    gap: 12,
   },
   input: {
     minHeight: 52,
@@ -167,7 +201,6 @@ const styles = StyleSheet.create({
   },
   actions: {
     flexDirection: 'row',
-    gap: 10,
   },
   primaryButton: {
     flex: 1,
@@ -196,12 +229,24 @@ const styles = StyleSheet.create({
     marginTop: 24,
     padding: 22,
     borderRadius: 12,
-    gap: 8,
+  },
+  carouselContainer: {
+    paddingRight: 8,
+  },
+  carouselItem: {
+    width: 300,
+    marginRight: 12,
+  },
+  resultImage: {
+    width: '100%',
+    height: 240,
+    borderRadius: 10,
+    backgroundColor: '#dfe8ea',
   },
   resultHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    gap: 12,
+    marginTop: 8,
   },
   resultTitle: {
     fontSize: 28,
@@ -209,7 +254,6 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   infoRow: {
-    gap: 2,
     marginTop: 6,
   },
   highlightsLabel: {
