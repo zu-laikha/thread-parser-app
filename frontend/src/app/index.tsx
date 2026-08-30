@@ -1,5 +1,5 @@
 import * as Clipboard from 'expo-clipboard';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -30,6 +30,15 @@ type ParsedPost = {
   image_urls?: string[];
 };
 
+type QuotaStatus = {
+  requests_used: number;
+  requests_remaining: number;
+  requests_limit: number;
+  reset_time: string | null;
+  rate_limited: boolean;
+  retry_after_seconds: number | null;
+};
+
 const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://127.0.0.1:8000';
 
 export default function HomeScreen() {
@@ -38,6 +47,42 @@ export default function HomeScreen() {
   const [result, setResult] = useState<ParsedPost | null>(null);
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [quota, setQuota] = useState<QuotaStatus | null>(null);
+  const [retryCountdown, setRetryCountdown] = useState<number | null>(null);
+
+  // Fetch quota status
+  async function fetchQuota() {
+    try {
+      const response = await fetch(`${API_URL}/quota`);
+      if (response.ok) {
+        const data = await response.json();
+        setQuota(data);
+        return data;
+      }
+    } catch (err) {
+      console.error('Failed to fetch quota:', err);
+    }
+    return null;
+  }
+
+  // Fetch quota on mount
+  useEffect(() => {
+    fetchQuota();
+    const interval = setInterval(fetchQuota, 5000); // Refresh every 5 seconds
+    return () => clearInterval(interval);
+  }, []);
+
+  // Countdown timer for rate limiting
+  useEffect(() => {
+    if (!retryCountdown || retryCountdown <= 0) {
+      setRetryCountdown(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      setRetryCountdown(retryCountdown - 1);
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [retryCountdown]);
 
   async function pasteUrl() {
     setUrl(await Clipboard.getStringAsync());
@@ -61,16 +106,32 @@ export default function HomeScreen() {
         body: JSON.stringify({ url: trimmedUrl }),
       });
       const payload = await response.json();
+      
+      // Handle 429 rate limit
+      if (response.status === 429) {
+        const retryAfter = response.headers.get('Retry-After');
+        const seconds = retryAfter ? parseInt(retryAfter) : 34;
+        setRetryCountdown(seconds);
+        setError(`Rate limited. Please wait ${seconds} seconds before trying again.`);
+        await fetchQuota();
+        return;
+      }
+      
       if (!response.ok) {
         throw new Error(typeof payload.detail === 'string' ? payload.detail : 'Unable to parse this post.');
       }
+      
       setResult(payload as ParsedPost);
+      await fetchQuota(); // Refresh quota after successful parse
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Unable to reach the parser.');
     } finally {
       setIsLoading(false);
     }
   }
+
+  const isRateLimited = retryCountdown !== null && retryCountdown > 0;
+  const canAnalyze = !isLoading && !isRateLimited;
 
   return (
     <ScrollView style={{ backgroundColor: theme.background }} contentContainerStyle={styles.container}>
@@ -80,6 +141,31 @@ export default function HomeScreen() {
           <ThemedText type="title" style={styles.title}>Make the thread useful.</ThemedText>
           <ThemedText themeColor="textSecondary">Turn a Threads post into a clear, saveable summary.</ThemedText>
         </View>
+
+        {/* Quota Status */}
+        {quota && (
+          <ThemedView type="backgroundElement" style={styles.quotaPanel}>
+            <View style={styles.quotaRow}>
+              <ThemedText type="small">
+                API Usage: {quota.requests_used}/{quota.requests_limit}
+              </ThemedText>
+              {quota.rate_limited ? (
+                <ThemedText type="small" style={{ color: '#C24135' }}>
+                  Rate limited
+                </ThemedText>
+              ) : (
+                <ThemedText type="small" themeColor="textSecondary">
+                  {quota.requests_remaining} remaining
+                </ThemedText>
+              )}
+            </View>
+            {quota.requests_remaining <= 3 && !quota.rate_limited && (
+              <ThemedText type="small" style={{ color: '#D97706', marginTop: 6 }}>
+                ⚠️ Low quota - only {quota.requests_remaining} requests left today
+              </ThemedText>
+            )}
+          </ThemedView>
+        )}
 
         <ThemedView type="backgroundElement" style={styles.inputPanel}>
           <ThemedText type="smallBold">Threads post URL</ThemedText>
@@ -91,14 +177,23 @@ export default function HomeScreen() {
             autoCapitalize="none"
             autoCorrect={false}
             keyboardType="url"
+            editable={!isRateLimited}
             style={[styles.input, { color: theme.text, borderColor: theme.textSecondary }]}
           />
           <View style={styles.actions}>
-            <Pressable onPress={pasteUrl} style={[styles.secondaryButton, { borderColor: theme.textSecondary }]}>
+            <Pressable onPress={pasteUrl} disabled={isRateLimited} style={[styles.secondaryButton, { borderColor: theme.textSecondary, opacity: isRateLimited ? 0.5 : 1 }]}>
               <ThemedText type="smallBold">Paste</ThemedText>
             </Pressable>
-            <Pressable disabled={isLoading} onPress={parsePost} style={styles.primaryButton}>
-              {isLoading ? <ActivityIndicator color="#ffffff" /> : <ThemedText type="smallBold" style={styles.buttonText}>Analyze</ThemedText>}
+            <Pressable disabled={!canAnalyze} onPress={parsePost} style={[styles.primaryButton, { opacity: canAnalyze ? 1 : 0.5 }]}>
+              {isLoading ? (
+                <ActivityIndicator color="#ffffff" />
+              ) : isRateLimited ? (
+                <ThemedText type="smallBold" style={styles.buttonText}>
+                  Wait {retryCountdown}s
+                </ThemedText>
+              ) : (
+                <ThemedText type="smallBold" style={styles.buttonText}>Analyze</ThemedText>
+              )}
             </Pressable>
           </View>
         </ThemedView>
@@ -261,5 +356,16 @@ const styles = StyleSheet.create({
   },
   sourceLink: {
     marginTop: 14,
+  },
+  quotaPanel: {
+    marginTop: 16,
+    marginBottom: 16,
+    padding: 12,
+    borderRadius: 8,
+  },
+  quotaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
 });
