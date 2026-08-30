@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import time
+from datetime import datetime
 from urllib.parse import urlparse
 
 import requests
@@ -50,12 +52,58 @@ class ParsedPost(BaseModel):
     image_urls: list[str] = []
 
 
+class QuotaStatus(BaseModel):
+    requests_used: int
+    requests_remaining: int
+    requests_limit: int
+    reset_time: str | None = None
+    rate_limited: bool = False
+    retry_after_seconds: int | None = None
+
+
 URL_CACHE: dict[str, ParsedPost] = {}
+
+# Quota tracking (Gemini free tier: 20 requests/day)
+QUOTA_LIMIT = 20
+API_CALLS_COUNT = 0
+RATE_LIMIT_RESET_TIME: float | None = None
+RATE_LIMIT_RETRY_AFTER: int | None = None
 
 
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+
+@app.get("/quota", response_model=QuotaStatus)
+def get_quota_status():
+    """Get current API quota usage and rate limit status."""
+    global RATE_LIMIT_RESET_TIME, RATE_LIMIT_RETRY_AFTER
+    
+    reset_time_str = None
+    retry_after = None
+    is_rate_limited = False
+    
+    # Check if we're currently rate limited
+    if RATE_LIMIT_RESET_TIME and time.time() < RATE_LIMIT_RESET_TIME:
+        is_rate_limited = True
+        retry_after = max(0, int(RATE_LIMIT_RESET_TIME - time.time()))
+        reset_time_str = datetime.fromtimestamp(RATE_LIMIT_RESET_TIME).isoformat()
+    elif RATE_LIMIT_RESET_TIME and time.time() >= RATE_LIMIT_RESET_TIME:
+        # Reset has passed, clear the rate limit
+        RATE_LIMIT_RESET_TIME = None
+        RATE_LIMIT_RETRY_AFTER = None
+    
+    remaining = max(0, QUOTA_LIMIT - API_CALLS_COUNT)
+    
+    return QuotaStatus(
+        requests_used=API_CALLS_COUNT,
+        requests_remaining=remaining,
+        requests_limit=QUOTA_LIMIT,
+        reset_time=reset_time_str,
+        rate_limited=is_rate_limited,
+        retry_after_seconds=retry_after,
+    )
 
 
 def is_threads_url(url: str) -> bool:
@@ -218,9 +266,20 @@ def parse_gemini_json(response_text: str | None) -> dict:
 
 
 def summarize_with_gemini(text: str, original_url: str, image_urls: list[str] | None = None) -> ParsedPost:
+    global API_CALLS_COUNT, RATE_LIMIT_RESET_TIME, RATE_LIMIT_RETRY_AFTER
+    
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key or api_key == "replace_with_your_gemini_api_key":
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not configured in backend/.env.")
+
+    # Check if currently rate limited
+    if RATE_LIMIT_RESET_TIME and time.time() < RATE_LIMIT_RESET_TIME:
+        retry_after = int(RATE_LIMIT_RESET_TIME - time.time())
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limited by Gemini API. Please retry in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)},
+        )
 
     image_list = image_urls or []
     prompt = f"""Extract structured information from this Threads post.
@@ -246,15 +305,37 @@ Post text:
                 response_schema=ParsedPost,
             ),
         )
+        # Successfully incremented call count
+        API_CALLS_COUNT += 1
+        
         data = parse_gemini_json(response.text)
         data["original_url"] = original_url
         data["image_url"] = (image_urls or [""])[0]
         data["image_urls"] = image_urls or []
         return ParsedPost.model_validate(data)
-    except (json.JSONDecodeError, TypeError, ValueError) as error:
-        raise HTTPException(status_code=502, detail="Gemini returned an invalid structured response.") from error
+    except HTTPException:
+        # Re-raise HTTP exceptions (like rate limit)
+        raise
     except Exception as error:
-        raise HTTPException(status_code=502, detail=f"Gemini request failed: {error}") from error
+        error_str = str(error)
+        # Handle Gemini 429 rate limit error
+        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+            # Extract retry-after time if available
+            retry_after = RATE_LIMIT_RETRY_AFTER or 34  # Default to 34 seconds from Gemini's error
+            RATE_LIMIT_RESET_TIME = time.time() + retry_after
+            RATE_LIMIT_RETRY_AFTER = retry_after
+            
+            raise HTTPException(
+                status_code=429,
+                detail=f"Gemini API quota exceeded. Please retry in {retry_after} seconds.",
+                headers={"Retry-After": str(retry_after)},
+            )
+        
+        # Handle other errors
+        if "JSONDecodeError" in error_str or "invalid structured response" in error_str:
+            raise HTTPException(status_code=502, detail="Gemini returned an invalid structured response.")
+        
+        raise HTTPException(status_code=502, detail=f"Gemini request failed: {error}")
 
 
 @app.post("/parse", response_model=ParsedPost)
